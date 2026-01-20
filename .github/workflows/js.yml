@@ -1,0 +1,171 @@
+name: ase cp SAST DAST SBOM SCA Secrets scanning
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  njsscan:
+    runs-on: ubuntu-latest
+    name: njsscan code scanning
+    steps:
+    - name: Checkout the code
+      uses: actions/checkout@v2
+    - name: nodejsscan scan
+      id: njsscan
+      uses: ajinabraham/njsscan-action@master
+      with:
+        args: '. --sarif --output results.sarif || true'
+    - name: Upload njsscan report
+      run : |
+        cat results.sarif
+        curl -X 'POST' \
+        'http://35.219.144.210:8080/api/v2/reimport-scan/' \
+        -H 'accept: application/json' \
+        -H 'Authorization: Token 3b221a7cd575642535585b55e2ce3d9e7e4f1fbd' \
+        -H 'Content-Type: multipart/form-data' \
+        -F 'test=11' \
+        -F '[email protected];type=application/json' \
+        -F file=@"results.sarif" \
+        -F 'scan_type=SARIF' \
+        -F 'tags=test'
+
+  npmAudit:
+    runs-on: ubuntu-latest
+    name: npmAudit library scanning
+    steps:
+    - name: Checkout the code
+      uses: actions/checkout@v2
+    - name: npmAudit scan
+      run : |
+        curl -sL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+        sudo apt-get install -y nodejs
+        npm install -g npm@6.14.18
+    - name: Upload npmAudit report
+      run : |
+        npm i --package-lock-only
+        npm audit --json >> npm_result.json || true
+        cat npm_result.json
+        curl -X 'POST' \
+        'http://35.219.144.210:8080/api/v2/reimport-scan/' \
+        -H 'accept: application/json' \
+        -H 'Authorization: Token 3b221a7cd575642535585b55e2ce3d9e7e4f1fbd' \
+        -H 'Content-Type: multipart/form-data' \
+        -F 'test=12' \
+        -F '[email protected];type=application/json' \
+        -F file=@"npm_result.json" \
+        -F 'scan_type=NPM Audit Scan' \
+        -F 'tags=test'
+
+  cyclonedx:
+    runs-on: ubuntu-latest
+    name: sbom dependency scanning
+    steps:
+      - name: Step1 Download the Source Code
+        uses: actions/checkout@v4
+
+      - name: Step2 Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ''
+
+      - name: Step3 Install Dependencies
+        run: npm install
+      
+      - name: Step4 Update NPM
+        run: npm update
+      
+      - name: Step4 Install cyclonedx
+        run: npm install --global @cyclonedx/cyclonedx-npm
+        
+      - name: Step5 NPM Audit Scan and Generate Report in JSON Format (default)
+        run: cyclonedx-npm -v --validate -o sbom_cyclone.json
+        continue-on-error: true
+
+      - name: Step6 send POST request ASE
+        run: |
+         cat sbom_cyclone.json
+         curl -X 'POST' \
+         'http://35.219.144.210:8080/api/v2/reimport-scan/' \
+         -H 'accept: application/json' \
+         -H 'Authorization: Token 3b221a7cd575642535585b55e2ce3d9e7e4f1fbd' \
+         -H 'Content-Type: multipart/form-data' \
+         -F 'test=13' \
+         -F '[email protected];type=application/json' \
+         -F file=@"sbom_cyclone.json" \
+         -F 'scan_type=NPM SBoM Scan' \
+         -F 'tags=test'jobs:
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install python deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f "app/requirements.txt" ]; then
+            pip install --no-cache-dir -r app/requirements.txt
+          else
+            echo "app/requirements.txt not found. Exiting."
+            exit 1
+          fi
+          pip install --no-cache-dir zaproxy==0.4.0
+          
+      - name: Install JSON tools
+        run: sudo apt-get install -y jq
+                
+      - name: Install OWASP ZAP
+        run: |
+          mkdir -p ./zap
+          cd ./zap
+          wget -N https://github.com/zaproxy/zaproxy/releases/download/v2.16.1/ZAP_2.16.1_Linux.tar.gz
+          tar -zxvf ZAP_2.16.1_Linux.tar.gz
+          rm ZAP_2.16.1_Linux.tar.gz
+          cd ZAP_2.16.1/plugin
+          wget https://github.com/zaproxy/zap-extensions/releases/download/exportreport-v6/exportreport-alpha-6.zap
+          echo 'export PATH_ZAP_SH=./zap/ZAP_2.16.1/zap.sh' >> ~/.bashrc
+          echo 'export ZAP_PORT=8090' >> ~/.bashrc
+          echo 'sh -c "$PATH_ZAP_SH -daemon -host 0.0.0.0 -port $ZAP_PORT -configfile ./zap/ZAP_2.16.1/conf" > /dev/null &' > start-zap
+          echo 'sleep 40' >> start-zap
+          echo 'sh -c "$PATH_ZAP_SH -host 0.0.0.0 -port $ZAP_PORT -configfile ./zap/ZAP_2.16.1/conf" > /dev/null &' > start-gui-zap
+          echo 'sleep 40' >> start-gui-zap
+          echo 'pkill -f zap' > stop-zap
+          chmod +x start-zap
+          chmod +x start-gui-zap
+          chmod +x stop-zap
+          echo $PWD
+          
+      - name: Run ZAP Daemon
+        run: |
+          ./zap/ZAP_2.16.1/zap.sh -daemon -host 0.0.0.0 -port 8090 -config api.addrs.addr.name=".*" -config api.addrs.addr.regex=true -config api.disablekey=true > /dev/null &
+          sleep 60
+          curl -I http://localhost:8090/ || echo "Warning: ZAP may not be running properly"
+          
+      - name: Run Test Automation with ZAP
+        run: |
+          cd ./tests/
+          python e2e_zap.py
+          
+      - name: Verify ZAP Report Content
+        run: |
+          echo "Checking ZAP report content:"
+          cat ./tests/zap-report.json | grep -v "@generated" | jq
+          
+      - name: Upload ZAP scab results to DefectDojo
+        run: |
+         cat sbom_cyclone.json
+         curl -X 'POST' \
+         'http://35.219.144.210:8080/api/v2/reimport-scan/' \
+         -H 'accept: application/json' \
+         -H 'Authorization: Token 3b221a7cd575642535585b55e2ce3d9e7e4f1fbd' \
+         -H 'Content-Type: multipart/form-data' \
+         -F 'test=3' \
+         -F '[email protected];type=application/json' \
+         -F file=@"sbom_cyclone.json" \
+         -F 'scan_type=NPM SBoM Scan' \
+         -F 'tags=test'jobs:
