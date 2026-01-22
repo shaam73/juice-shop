@@ -2,10 +2,10 @@ name: Juice Shop DAST ZAP Scan
 
 on:
   pull_request:
-    branches: [master]
+    branches: [ master ]
 
-  push_request:
-    branches: [master]
+  push:
+    branches: [ master ]
 
 jobs:
  # zap scan:
